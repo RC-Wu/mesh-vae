@@ -1,0 +1,76 @@
+seed: 20260316
+run:
+  root: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260316_artistic_mesh_cls/runs
+  name: ""
+data:
+  cache_root: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260316_artistic_mesh_cls/cache_r1024_resolve
+  all_ids: []
+  augment_vertex_perm: true
+  split:
+    mode: explicit
+    train_ids: []
+    val_ids: []
+loader:
+  batch_size: 2
+  val_batch_size: 2
+  num_workers: 0
+  pin_memory: true
+model:
+  resolution: 1024
+  feature_dim: 9
+  num_bins: 1024
+  model_channels: [64, 128, 256, 512]
+  latent_channels: 32
+  num_blocks: [2, 2, 2, 2]
+  block_type: [SparseResBlock3d, SparseResBlock3d, SparseResBlock3d, SparseResBlock3d]
+  down_block_type: [SparseResBlockDownsample3d, SparseResBlockDownsample3d, SparseResBlockDownsample3d]
+  up_block_type: [SparseResBlockUpsample3d, SparseResBlockUpsample3d, SparseResBlockUpsample3d]
+  block_args: [{}, {}, {}, {}]
+  decoder_out_channels: 256
+  head_mlp_hidden: 512
+  head_num_layers: 3
+  regression_head_hidden: 256
+  predict_subdiv: true
+  use_fp16: false
+loss:
+  lambda_ce: 1.0
+  lambda_aux_regression: 0.1
+  lambda_direct_regression: 0.0
+  lambda_subdiv: 0.02
+  lambda_kl: 1.0e-6
+  lambda_consistency: 0.05
+  consistency_max_pairs: 50000
+optim:
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.95]
+trainer:
+  max_steps: 400
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  val_check_interval: 25
+  enable_progress_bar: true
+  num_sanity_val_steps: 0
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  strategy: auto
+  accumulate_grad_batches: 1
+checkpoint:
+  save_top_k: 1
+  monitor: val/ce_recon
+  mode: min
+  filename: "{epoch:02d}-{val/ce_recon:.4f}"
+monitor:
+  swanlab:
+    enabled: false
+    project: trellis2-artistic-mesh-vae
+    workspace: ""
+    experiment_name: ""
+    description: ""
+    mode: cloud
+    tags: [overfit, smoke]
+preview:
+  num_samples: 2
+  merge_threshold: 0.0005

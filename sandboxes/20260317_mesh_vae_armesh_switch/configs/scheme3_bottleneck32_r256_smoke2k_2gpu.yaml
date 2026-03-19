@@ -1,0 +1,80 @@
+seed: 20260317
+run:
+  root: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260317_mesh_vae_armesh_switch/runs
+  name: ""
+data:
+  cache_root: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260317_mesh_vae_parallel/cache_smoke2k_r256_b1024
+  all_ids: []
+  augment_vertex_perm: true
+  split:
+    mode: explicit
+    train_ids_path: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260317_mesh_vae_parallel/splits/train_ids.txt
+    val_ids_path: /dev_vepfs/rc_wu/trellis2_michelangelo_bakeoff/sandboxes/20260317_mesh_vae_parallel/splits/val_ids.txt
+loader:
+  batch_size: 4
+  val_batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+model:
+  resolution: 256
+  feature_dim: 9
+  num_bins: 1024
+  model_channels: [64, 128, 256, 512]
+  latent_channels: 32
+  num_blocks: [2, 2, 2, 2]
+  block_type: [SparseResBlock3d, SparseResBlock3d, SparseResBlock3d, SparseResBlock3d]
+  down_block_type: [SparseResBlockDownsample3d, SparseResBlockDownsample3d, SparseResBlockDownsample3d]
+  up_block_type: [SparseResBlockUpsample3d, SparseResBlockUpsample3d, SparseResBlockUpsample3d]
+  block_args: [{}, {}, {}, {}]
+  bottleneck_attention:
+    num_blocks: 0
+  decoder_out_channels: 256
+  head_mlp_hidden: 512
+  head_num_layers: 3
+  regression_head_hidden: 256
+  predict_subdiv: true
+  use_fp16: false
+loss:
+  lambda_ce: 1.0
+  lambda_aux_regression: 0.1
+  lambda_direct_regression: 0.0
+  lambda_subdiv: 0.02
+  lambda_kl: 1.0e-6
+  lambda_consistency: 0.05
+  consistency_max_pairs: 100000
+optim:
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.95]
+trainer:
+  max_steps: 3000
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  log_every_n_steps: 20
+  val_check_interval: 100
+  enable_progress_bar: true
+  num_sanity_val_steps: 0
+  accelerator: gpu
+  devices: 2
+  num_nodes: 1
+  strategy: ddp
+  accumulate_grad_batches: 1
+checkpoint:
+  save_top_k: 2
+  monitor: val/ce_recon
+  mode: min
+  filename: "{epoch:02d}-{val/ce_recon:.4f}"
+monitor:
+  swanlab:
+    enabled: true
+    project: trellis2-artistic-mesh-vae
+    workspace: ""
+    experiment_name: ""
+    description: scheme3 smaller spatial bottleneck to 32^3 using the launchable smoke2k r256 cache.
+    mode: cloud
+    tags: [scheme3, bottleneck32, smoke2k, bins1024, r256, 2gpu]
+preview:
+  num_samples: 0
+  merge_threshold: 0.0005
