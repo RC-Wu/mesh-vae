@@ -454,10 +454,14 @@ class QuantizedFaceVaeModule(pl.LightningModule):
         self.lambda_topo_open_boundary = float(loss_cfg.get("lambda_topo_open_boundary", 0.0))
         self.lambda_structure_token = float(loss_cfg.get("lambda_structure_token", 0.0))
         self.lambda_fill_token = float(loss_cfg.get("lambda_fill_token", 0.0))
+        self.lambda_center_token = float(loss_cfg.get("lambda_center_token", 0.0))
+        self.lambda_center_direct_regression = float(loss_cfg.get("lambda_center_direct_regression", 0.0))
         self.topology_head_hidden = int(model_cfg.get("topology_head_hidden", max(64, int(model_cfg["decoder_out_channels"]) // 2)))
         self.topology_head_num_layers = int(model_cfg.get("topology_head_num_layers", 2))
         self.role_head_hidden = int(model_cfg.get("role_head_hidden", self.topology_head_hidden))
         self.role_head_num_layers = int(model_cfg.get("role_head_num_layers", self.topology_head_num_layers))
+        self.center_head_hidden = int(model_cfg.get("center_head_hidden", self.role_head_hidden))
+        self.center_head_num_layers = int(model_cfg.get("center_head_num_layers", self.role_head_num_layers))
         token_bottleneck_cfg = dict(model_cfg.get("token_bottleneck") or {})
         behavior_cfg = dict(model_cfg.get("behavior") or {})
         self.train_behavior = self._resolve_behavior(
@@ -531,6 +535,8 @@ class QuantizedFaceVaeModule(pl.LightningModule):
         self.topology_open_boundary_head = None
         self.structure_token_head = None
         self.fill_token_head = None
+        self.center_token_head = None
+        self.center_regression_head = None
         if self.lambda_topo_edge > 0.0:
             self.topology_edge_head = BinaryTopologyHead(
                 hidden_dim=int(model_cfg["decoder_out_channels"]),
@@ -554,6 +560,17 @@ class QuantizedFaceVaeModule(pl.LightningModule):
                 hidden_dim=int(model_cfg["decoder_out_channels"]),
                 head_hidden=self.role_head_hidden,
                 num_layers=self.role_head_num_layers,
+            )
+        if self.lambda_center_token > 0.0:
+            self.center_token_head = BinaryRoleHead(
+                hidden_dim=int(model_cfg["decoder_out_channels"]),
+                head_hidden=self.center_head_hidden,
+                num_layers=self.center_head_num_layers,
+            )
+        if self.lambda_center_direct_regression > 0.0:
+            self.center_regression_head = RegressionHead(
+                hidden_dim=int(model_cfg["decoder_out_channels"]),
+                mlp_hidden=int(model_cfg.get("center_regression_head_hidden", model_cfg.get("regression_head_hidden", model_cfg["decoder_out_channels"]))),
             )
         self.regression_head = None
         if float(loss_cfg.get("lambda_direct_regression", 0.0)) > 0:
@@ -664,6 +681,21 @@ class QuantizedFaceVaeModule(pl.LightningModule):
         fill_targets = fill_targets.to(device=device).reshape(-1)
         return structure_targets, fill_targets
 
+    def _resolve_center_targets(
+        self,
+        batch: Dict[str, Any],
+        device: torch.device,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        center_targets = batch.get("center_token_target")
+        center_offsets = batch.get("center_gt_offsets")
+        if center_targets is None and center_offsets is None:
+            return None
+        if center_targets is None or center_offsets is None:
+            raise ValueError(
+                "center-token supervision expects both `center_token_target` and `center_gt_offsets`"
+            )
+        return center_targets.to(device=device).reshape(-1), center_offsets.to(device=device)
+
     @staticmethod
     def _binary_head_metrics(logits: torch.Tensor, targets: torch.Tensor) -> Dict[str, torch.Tensor]:
         if logits.numel() == 0 or targets.numel() == 0:
@@ -733,6 +765,8 @@ class QuantizedFaceVaeModule(pl.LightningModule):
         )
         structure_token_logits = self.structure_token_head(hidden_feats) if self.structure_token_head is not None else None
         fill_token_logits = self.fill_token_head(hidden_feats) if self.fill_token_head is not None else None
+        center_token_logits = self.center_token_head(hidden_feats) if self.center_token_head is not None else None
+        center_direct_regression = self.center_regression_head(hidden_feats) if self.center_regression_head is not None else None
         direct_regression = self.regression_head(hidden_feats) if self.regression_head is not None else None
         return {
             "pred_sparse": pred_sparse,
@@ -743,6 +777,8 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             "topology_logits_open_boundary": topology_logits_open_boundary,
             "structure_token_logits": structure_token_logits,
             "fill_token_logits": fill_token_logits,
+            "center_token_logits": center_token_logits,
+            "center_direct_regression": center_direct_regression,
             "direct_regression": direct_regression,
             "subs_gt": subs_gt,
             "subs": subs,
@@ -922,6 +958,45 @@ class QuantizedFaceVaeModule(pl.LightningModule):
                 fill_token_target_pos_rate = fill_metrics["target_pos_rate"]
                 fill_token_pred_pos_rate = fill_metrics["pred_pos_rate"]
 
+        center_targets = None
+        if self.center_token_head is not None or self.center_regression_head is not None:
+            center_targets = self._resolve_center_targets(batch, device=gt_offsets.device)
+            if center_targets is None:
+                raise ValueError(
+                    "center-token losses are enabled but the batch does not contain center-token supervision"
+                )
+        center_token_loss = gt_offsets.new_zeros(())
+        center_token_acc = gt_offsets.new_zeros(())
+        center_token_target_pos_rate = gt_offsets.new_zeros(())
+        center_token_pred_pos_rate = gt_offsets.new_zeros(())
+        center_direct_regression = gt_offsets.new_zeros(())
+        center_offset_mae = gt_offsets.new_zeros(())
+        center_positive_count = gt_offsets.new_zeros(())
+        if center_targets is not None:
+            center_token_targets, center_gt_offsets = center_targets
+            if self.center_token_head is not None:
+                if center_token_targets.shape[0] != outputs["center_token_logits"].shape[0]:
+                    raise ValueError(
+                        "center-token targets length does not match decoder token count: "
+                        f"{center_token_targets.shape[0]} vs {outputs['center_token_logits'].shape[0]}"
+                    )
+                center_metrics = self._binary_head_metrics(outputs["center_token_logits"], center_token_targets)
+                center_token_loss = center_metrics["loss"]
+                center_token_acc = center_metrics["acc"]
+                center_token_target_pos_rate = center_metrics["target_pos_rate"]
+                center_token_pred_pos_rate = center_metrics["pred_pos_rate"]
+            if self.center_regression_head is not None:
+                positive_mask = center_token_targets > 0
+                center_positive_count = positive_mask.float().sum()
+                if positive_mask.any():
+                    center_direct_regression = F.smooth_l1_loss(
+                        outputs["center_direct_regression"][positive_mask],
+                        center_gt_offsets[positive_mask],
+                    )
+                    center_offset_mae = (
+                        outputs["center_direct_regression"][positive_mask] - center_gt_offsets[positive_mask]
+                    ).abs().mean()
+
         total = (
             float(self.loss_cfg.get("lambda_ce", 1.0)) * ce_recon
             + float(self.loss_cfg.get("lambda_aux_regression", 0.0)) * aux_regression
@@ -933,6 +1008,8 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             + self.lambda_topo_open_boundary * topology_open_boundary_loss
             + self.lambda_structure_token * structure_token_loss
             + self.lambda_fill_token * fill_token_loss
+            + self.lambda_center_token * center_token_loss
+            + self.lambda_center_direct_regression * center_direct_regression
         )
 
         acc_bins = (pred_bins == gt_bins).float().mean()
@@ -987,6 +1064,13 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             "fill_token_target_pos_rate": fill_token_target_pos_rate.detach(),
             "structure_token_pred_pos_rate": structure_token_pred_pos_rate.detach(),
             "fill_token_pred_pos_rate": fill_token_pred_pos_rate.detach(),
+            "center_token_loss": center_token_loss.detach(),
+            "center_token_acc": center_token_acc.detach(),
+            "center_token_target_pos_rate": center_token_target_pos_rate.detach(),
+            "center_token_pred_pos_rate": center_token_pred_pos_rate.detach(),
+            "center_direct_regression": center_direct_regression.detach(),
+            "center_offset_mae": center_offset_mae.detach(),
+            "center_positive_count": center_positive_count.detach(),
             "acc_bins": acc_bins.detach(),
             "acc_face": acc_face.detach(),
             "acc_vertex_v0": acc_vertex_v0.detach(),
@@ -1039,6 +1123,13 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             "fill_token_target_pos_rate",
             "structure_token_pred_pos_rate",
             "fill_token_pred_pos_rate",
+            "center_token_loss",
+            "center_token_acc",
+            "center_token_target_pos_rate",
+            "center_token_pred_pos_rate",
+            "center_direct_regression",
+            "center_offset_mae",
+            "center_positive_count",
             "acc_bins",
             "acc_face",
             "acc_vertex_v0",
@@ -1094,6 +1185,13 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             "fill_token_target_pos_rate",
             "structure_token_pred_pos_rate",
             "fill_token_pred_pos_rate",
+            "center_token_loss",
+            "center_token_acc",
+            "center_token_target_pos_rate",
+            "center_token_pred_pos_rate",
+            "center_direct_regression",
+            "center_offset_mae",
+            "center_positive_count",
             "acc_bins",
             "acc_face",
             "acc_vertex_v0",
@@ -1123,8 +1221,9 @@ class QuantizedFaceVaeModule(pl.LightningModule):
             "topology_logits_open_boundary": outputs["topology_logits_open_boundary"],
             "structure_token_logits": outputs["structure_token_logits"],
             "fill_token_logits": outputs["fill_token_logits"],
+            "center_token_logits": outputs["center_token_logits"],
+            "center_direct_regression": outputs["center_direct_regression"],
         }
 
 
 AnchorFaceVaeModule = QuantizedFaceVaeModule
-

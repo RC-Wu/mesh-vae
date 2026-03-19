@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Train the quantized artistic-mesh VAE classifier.")
     ap.add_argument("--config", required=True, type=Path)
     ap.add_argument("--ckpt-path", type=Path, default=None)
+    ap.add_argument("--ckpt-load-strict", choices=["true", "false"], default="true")
     ap.add_argument("overrides", nargs="*")
     return ap.parse_args()
 
@@ -199,6 +200,24 @@ def main() -> None:
         loss_cfg=loss_cfg,
         optim_cfg=optim_cfg,
     )
+    ckpt_load_strict = str(args.ckpt_load_strict).lower() == "true"
+    fit_ckpt_path = str(ckpt_path) if ckpt_path is not None else None
+    if ckpt_path is not None and not ckpt_load_strict:
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        incompatible = module.load_state_dict(checkpoint["state_dict"], strict=False)
+        (run_dir / "nonstrict_checkpoint_load.json").write_text(
+            json.dumps(
+                {
+                    "checkpoint_path": str(ckpt_path),
+                    "missing_keys": list(incompatible.missing_keys),
+                    "unexpected_keys": list(incompatible.unexpected_keys),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        fit_ckpt_path = None
 
     logger = build_loggers(run_dir, config, run_name)
     checkpoint_cfg = config.get("checkpoint", {})
@@ -236,7 +255,7 @@ def main() -> None:
         strategy=config.trainer.get("strategy", "auto"),
         accumulate_grad_batches=int(config.trainer.get("accumulate_grad_batches", 1)),
     )
-    trainer.fit(module, train_loader, val_loader, ckpt_path=(str(ckpt_path) if ckpt_path is not None else None))
+    trainer.fit(module, train_loader, val_loader, ckpt_path=fit_ckpt_path)
 
     metrics = {}
     for key, value in trainer.callback_metrics.items():
@@ -263,4 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

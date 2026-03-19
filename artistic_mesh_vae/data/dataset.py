@@ -184,6 +184,8 @@ def collate_quantized_faces(batch: Sequence[Dict[str, object]]) -> Dict[str, obj
     sampling_parts: List[torch.Tensor] = []
     token_role_parts: List[torch.Tensor] = []
     gt_offsets_parts: List[torch.Tensor] = []
+    center_token_parts: List[torch.Tensor] = []
+    center_gt_offsets_parts: List[torch.Tensor] = []
     bin_parts: List[torch.Tensor] = []
     adj_fi_parts: List[torch.Tensor] = []
     adj_fj_parts: List[torch.Tensor] = []
@@ -235,6 +237,16 @@ def collate_quantized_faces(batch: Sequence[Dict[str, object]]) -> Dict[str, obj
         else:
             token_role_flags_np = np.zeros((face_count, 2), dtype=np.uint8)
         token_role_parts.append(torch.from_numpy(np.asarray(token_role_flags_np, dtype=np.uint8)))
+        center_token_parts.append(
+            torch.from_numpy(
+                np.asarray(item.get("center_token_target", np.zeros((face_count,), dtype=np.uint8)), dtype=np.uint8)
+            )
+        )
+        center_gt_offsets_parts.append(
+            torch.from_numpy(
+                np.asarray(item.get("center_gt_offsets", np.zeros((face_count, 9), dtype=np.float32)), dtype=np.float32)
+            )
+        )
         bins_np = np.asarray(item["bin_indices"], dtype=np.int64)
         bins = torch.from_numpy(bins_np)
         batch_prefix = torch.full((face_count, 1), batch_index, dtype=torch.int32)
@@ -280,6 +292,8 @@ def collate_quantized_faces(batch: Sequence[Dict[str, object]]) -> Dict[str, obj
         "coords_xyz": coords_cat[:, 1:],
         "feats": feats_cat,
         "gt_offsets": gt_offsets_cat,
+        "center_token_target": torch.cat(center_token_parts, dim=0),
+        "center_gt_offsets": torch.cat(center_gt_offsets_parts, dim=0),
         "topo_flags": topo_cat,
         "sampling_flags": sampling_cat,
         "token_role_flags": token_role_cat,

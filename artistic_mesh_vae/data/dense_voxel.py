@@ -705,10 +705,27 @@ def _materialize_dense_payload(
         feats = np.zeros((0, 9), dtype=np.float32)
         bin_indices = np.zeros((0, 9), dtype=np.int64)
 
+    center_token_target = np.zeros((len(coords),), dtype=np.uint8)
+    center_gt_offsets = np.zeros((len(coords), 9), dtype=np.float32)
+    if len(coords) > 0 and len(owner_face_index) > 0:
+        voxel_centers = (coords.astype(np.float32) + 0.5) / float(resolution)
+        unique_faces = np.unique(owner_face_index.astype(np.int64, copy=False))
+        for face_index in unique_faces.tolist():
+            token_indices = np.flatnonzero(owner_face_index == face_index)
+            if token_indices.size == 0:
+                continue
+            face_centroid = normalized_vertices[faces[int(face_index)]].mean(axis=0)
+            distances = np.linalg.norm(voxel_centers[token_indices] - face_centroid[None, :], axis=1)
+            center_token_index = int(token_indices[int(np.argmin(distances))])
+            center_token_target[center_token_index] = np.uint8(1)
+            center_gt_offsets[center_token_index] = feats[center_token_index]
+
     return {
         "coords": coords,
         "feats": feats,
         "bin_indices": bin_indices,
+        "center_token_target": center_token_target,
+        "center_gt_offsets": center_gt_offsets,
         "topo_flags": topo_flags.astype(np.uint8),
         "sampling_flags": sampling_flags.astype(np.uint8),
         "is_edge_band": hits["is_edge_band"][selected_indices].astype(np.uint8),
